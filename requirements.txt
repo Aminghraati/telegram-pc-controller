@@ -1,3 +1,5 @@
 requests
 psutil
 mss
+sounddevice
+imageio-ffmpeg
