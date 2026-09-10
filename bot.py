@@ -152,7 +152,9 @@ def sys_status() -> str:
 def run_powershell(cmd: str) -> str:
     """اجرای دستور با فیلتر امنیتی"""
     banned = ["format ", "del /f /s /q c:", "rd /s /q c:\\", "remove-item c:\\windows",
-              "shutdown", "restart-computer", "cipher /w", "vssadmin delete"]
+              "cipher /w", "vssadmin delete"]
+    # نکته: shutdown/restart از مسیر /shutdown و /restart با تأیید دو مرحله‌ای مجاز است؛
+    # از طریق /run خاموش مسدود می‌ماند تا کسی اشتباهی سیستم را نکشد
     low = cmd.lower()
     for b in banned:
         if b in low:
@@ -275,6 +277,12 @@ def handle_command(chat_id: int, text: str):
             "   (برای ذخیره: آخر پیام بنویس {ذخیره شود})\n"
             "🆕 /new — پاک کردن حافظه AI\n"
             "🛑 /stop — توقف کار در حال اجرا\n"
+            "⛔ /shutdown ok — خاموش کردن (تأیید لازم)\n"
+            "🔄 /restart ok — ری‌استارت (تأیید لازم)\n"
+            "🌙 /sleep — حالت خواب (S0)\n"
+            "💾 /hibernate — نمدار کامل (بیداری با کلید پاور / Magic Packet)\n"
+            "🔒 /lock — قفل ویندوز\n"
+            "✅ /abort — لغو خاموشی در انتظار\n"
             "📁 /cd مسیر — تغییر پوشه کاری AI\n"
             "📥 فایل/عکس بفرستی → ذخیره در\n"
             f"   {DL_DIR}\n"
@@ -303,6 +311,46 @@ def handle_command(chat_id: int, text: str):
 
     elif cmd == "/texts":
         send(chat_id, list_texts())
+
+    elif cmd == "/shutdown":
+        # خاموش کردن سیستم — نیاز به تأیید دو مرحله‌ای
+        if arg.lower() in ("ok", "تایید", "تأیید", "yes"):
+            send(chat_id, "⛔ سیستم تا 10 ثانیه دیگر خاموش می‌شود... "
+                          "(برای لغو: /abort)")
+            log.info("SHUTDOWN requested")
+            run_powershell("shutdown /s /t 10 /c 'بات تلگرام: خاموشی'")
+        else:
+            send(chat_id, "⚠ مطمئنی؟ برای تأیید خاموشی بفرست:\n/shutdown ok\n"
+                          "(برای لغو بعد از تأیید: /abort)")
+
+    elif cmd == "/restart":
+        if arg.lower() in ("ok", "تایید", "تأیید", "yes"):
+            send(chat_id, "🔄 سیستم تا 10 ثانیه دیگر ری‌استارت می‌شود... "
+                          "(برای لغو: /abort)")
+            log.info("RESTART requested")
+            run_powershell("shutdown /r /t 10 /c 'بات تلگرام: ری‌استارت'")
+        else:
+            send(chat_id, "⚠ مطمئنی؟ برای تأیید ری‌استارت بفرست:\n/restart ok\n"
+                          "(برای لغو: /abort)")
+
+    elif cmd == "/sleep":
+        send(chat_id, "🌙 سیستم به حالت خواب رفت. (بیدار کردن: فقط با کلید/ماوس یا Wake-on-LAN)")
+        run_powershell("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
+
+    elif cmd == "/abort":
+        run_powershell("shutdown /a")
+        send(chat_id, "✅ خاموشی/ری‌استارت در انتظار، لغو شد.")
+
+    elif cmd == "/lock":
+        send(chat_id, "🔒 ویندوز قفل شد.")
+        run_powershell("rundll32.exe user32.dll,LockWorkStation")
+
+    elif cmd == "/hibernate":
+        send(chat_id, "💾 سیستم در حال Hibernate (نمدار)...\n"
+                      "مصرف برق ≈ صفر. بیدار کردن: کلید پاور لپ‌تاپ، یا "
+                      "Magic Packet از اپ گوشی (Wake On LAN) روی همان WiFi.")
+        log.info("HIBERNATE requested")
+        run_powershell("shutdown /h")
 
     elif cmd == "/shot":
         send(chat_id, "📸 در حال گرفتن اسکرین‌شات…")
@@ -492,6 +540,14 @@ def quick_match(text: str):
         if key in t and ("باز" in t or "بخش" in t or "رو" in t):
             run_powershell(f"Start-Process '{target}'")
             return f"⚡ باز شد: {key} (فوری)"
+
+    # راهنما برای خاموش/ری‌استارت با جمله فارسی
+    if any(w in t for w in ("خاموش", "شات داون", "shutdown")) and \
+            any(w in t for w in ("کامپیوتر", "سیستم", "لپ", "پی سی", "pc")):
+        return "⛔ برای خاموش کردن از دستور تأییددار استفاده کن:\n/shutdown ok"
+    if any(w in t for w in ("ریستارت", "ری استارت", "restart")) and \
+            any(w in t for w in ("کامپیوتر", "سیستم", "لپ", "پی سی", "pc")):
+        return "⛔ برای ری‌استارت از دستور تأییددار استفاده کن:\n/restart ok"
 
     return None
 
