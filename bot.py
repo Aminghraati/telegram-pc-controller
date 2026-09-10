@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import json
+import time
 import shutil
 import socket
 import subprocess
@@ -16,6 +17,17 @@ import requests
 import psutil
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[
+        logging.FileHandler(os.path.join(BASE, "bot.log"), encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+log = logging.getLogger("bot")
+
 with open(os.path.join(BASE, "config.json"), encoding="utf-8") as f:
     CFG = json.load(f)
 
@@ -211,6 +223,86 @@ def find_file(root: str, pattern: str, limit: int = 20) -> list:
     return hits
 
 
+# ---------------- Screen Recorder ----------------
+
+class ScreenRecorder:
+    """ضبط ویدیویی صفحه — بدون ffmpeg، فقط mss + OpenCV"""
+    def __init__(self):
+        self.recording = False
+        self.path = None
+        self.start_time = None
+        self._thread = None
+        self._writer = None
+
+    def start(self):
+        if self.recording:
+            return None, "already"
+        import cv2  # noqa
+        self.path = os.path.join(DL_DIR, f"rec_{datetime.now():%Y%m%d_%H%M%S}.mp4")
+        self.recording = True
+        self.start_time = datetime.now()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self.path, "started"
+
+    def _run(self):
+        import mss
+        import cv2
+        import numpy as np
+        try:
+            with mss.mss() as s:
+                mon = s.monitors[0]   # کل صفحه‌ها ترکیبی
+                w = mon["width"] - (mon["width"] % 2)
+                h = mon["height"] - (mon["height"] % 2)
+                region = {"left": mon["left"], "top": mon["top"],
+                          "width": w, "height": h}
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                self._writer = cv2.VideoWriter(self.path, fourcc, 12, (w, h))
+                while self.recording:
+                    raw = np.array(s.grab(region))          # BGRA
+                    frame = cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
+                    self._writer.write(frame)
+                    time.sleep(1 / 12)                      # ~12 fps
+        except Exception as e:
+            log.error("recorder error: %s", e)
+        finally:
+            if self._writer:
+                self._writer.release()
+            self._writer = None
+
+    def stop(self):
+        if not self.recording:
+            return None
+        self.recording = False
+        if self._thread:
+            self._thread.join(timeout=15)
+        dur = datetime.now() - self.start_time
+        secs = int(dur.total_seconds())
+        size = os.path.getsize(self.path) if os.path.exists(self.path) else 0
+        return {"path": self.path, "seconds": secs, "size_mb": size / 1e6}
+
+
+recorder = ScreenRecorder()
+
+
+def send_video(chat_id, path: str, caption: str = ""):
+    log.info("SEND VIDEO → %s", path)
+    try:
+        with open(path, "rb") as f:
+            r = requests.post(
+                f"{API}/sendVideo",
+                data={"chat_id": chat_id, "caption": caption[:1000],
+                      "supports_streaming": "true"},
+                files={"video": (os.path.basename(path), f)},
+                timeout=600, proxies=PROXIES,
+            )
+        if not r.json().get("ok"):
+            send(chat_id, f"خطا در ارسال ویدیو: {r.json().get('description', '?')}")
+    except Exception as e:
+        log.error("send_video failed: %s", e)
+        send(chat_id, f"خطا در ارسال ویدیو: {e}")
+
+
 # ---------------- Command handlers ----------------
 
 def save_text_message(text: str) -> str:
@@ -268,6 +360,9 @@ def handle_command(chat_id: int, text: str):
             "────────────────\n"
             "دستورات سریع:\n"
             "📸 /shot — اسکرین‌شات\n"
+            "🎥 /rec — شروع ضبط ویدیوی صفحه\n"
+            "⏹ /recstop — قطع ضبط\n"
+            "📤 /recsend — ارسال ویدیو ضبط‌شده\n"
             "📄 /file مسیر — ارسال فایل\n"
             "📂 /ls مسیر — لیست پوشه\n"
             "🔍 /find اسم — جستجوی فایل\n"
@@ -351,6 +446,41 @@ def handle_command(chat_id: int, text: str):
                       "Magic Packet از اپ گوشی (Wake On LAN) روی همان WiFi.")
         log.info("HIBERNATE requested")
         run_powershell("shutdown /h")
+
+    elif cmd == "/rec":
+        path, status = recorder.start()
+        if status == "already":
+            send(chat_id, "🔴 ضبط از قبل در حال اجراست! اول /recstop بزن.")
+        else:
+            send(chat_id, "🔴 ضبط ویدیو از صفحه شروع شد!\n"
+                          "⏹ قطع: /recstop\n"
+                          "📤 ارسال بعد از قطع: /recsend")
+
+    elif cmd == "/recstop":
+        info = recorder.stop()
+        if info is None:
+            send(chat_id, "⚠ ضبطی در حال اجرا نیست. شروع: /rec")
+        else:
+            send(chat_id, f"⏹ ضبط تمام شد!\n"
+                          f"⏱ مدت: {info['seconds']} ثانیه\n"
+                          f"💾 حجم: {info['size_mb']:.1f} MB\n"
+                          f"📤 ارسال: /recsend")
+
+    elif cmd == "/recsend":
+        if recorder.recording:
+            send(chat_id, "⚠ هنوز داری ضبط می‌کنی! اول /recstop بزن.")
+            return
+        p = recorder.path
+        if p and os.path.exists(p):
+            size_mb = os.path.getsize(p) / 1e6
+            if size_mb > MAX_MB:
+                send(chat_id, f"⚠ ویدیو {size_mb:.0f}MB است — بالاتر از سقف "
+                              f"{MAX_MB}MB تلگرام. ضبط کوتاه‌تر کن.")
+                return
+            send(chat_id, "📤 در حال ارسال ویدیو…")
+            send_video(chat_id, p, "🎬 ویدیوی صفحه")
+        else:
+            send(chat_id, "⚠ ویدیویی برای ارسال نیست. اول ضبط کن: /rec")
 
     elif cmd == "/shot":
         send(chat_id, "📸 در حال گرفتن اسکرین‌شات…")
@@ -612,15 +742,11 @@ def reply_with_ai(chat_id: int, text: str):
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-        handlers=[
-            logging.FileHandler(os.path.join(BASE, "bot.log"), encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
-    log = logging.getLogger("bot")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
     log.info("=== Remote Assistant starting ===")
     log.info("Owner: %s | Downloads: %s", OWNER, DL_DIR)
     send(OWNER, "🟢 بات آنلاین شد. /help برای راهنما.")
