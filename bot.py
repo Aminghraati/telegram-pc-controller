@@ -322,6 +322,35 @@ def send_video(chat_id, path: str, caption: str = "", delete_after: bool = False
     return sent_ok
 
 
+# ---------------- Webcam ----------------
+
+def capture_webcam() -> str:
+    """یک عکس از وب‌کم می‌گیرد و مسیرش را برمی‌گرداند"""
+    import cv2
+    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    if not cap.isOpened():
+        raise RuntimeError("وب‌کم پیدا نشد یا برنامه دیگری اشغالش کرده")
+    try:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        frame = None
+        for _ in range(15):          # گرم‌کردن دوربین (اولین فریم‌ها تیره‌اند)
+            ret, f = cap.read()
+            if ret and f is not None:
+                frame = f
+            time.sleep(0.06)
+        if frame is None:
+            raise RuntimeError("وب‌کم فریم نداد")
+        os.makedirs(DL_DIR, exist_ok=True)
+        path = os.path.join(DL_DIR, f"cam_{datetime.now():%Y%m%d_%H%M%S}.jpg")
+        cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if not os.path.exists(path) or os.path.getsize(path) < 5000:
+            raise RuntimeError("ذخیره عکس ناموفق بود")
+        return path
+    finally:
+        cap.release()
+
+
 # ---------------- Command handlers ----------------
 
 def save_text_message(text: str) -> str:
@@ -379,6 +408,7 @@ def handle_command(chat_id: int, text: str):
             "────────────────\n"
             "دستورات سریع:\n"
             "📸 /shot — اسکرین‌شات\n"
+            "📷 /cam — عکس از وب‌کم\n"
             "🎥 /rec — شروع ضبط ویدیوی صفحه\n"
             "⏹ /recstop — قطع ضبط\n"
             "📤 /recsend — ارسال ویدیو ضبط‌شده\n"
@@ -465,6 +495,14 @@ def handle_command(chat_id: int, text: str):
                       "Magic Packet از اپ گوشی (Wake On LAN) روی همان WiFi.")
         log.info("HIBERNATE requested")
         run_powershell("shutdown /h")
+
+    elif cmd == "/cam":
+        send(chat_id, "📷 وب‌کم روشن شد — چند لحظه…")
+        try:
+            p = capture_webcam()
+            send_photo(chat_id, p, "📷 وب‌کم", delete_after=True)
+        except Exception as e:
+            send(chat_id, f"⚠ {e}")
 
     elif cmd == "/rec":
         path, status = recorder.start()
