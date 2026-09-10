@@ -101,8 +101,9 @@ def send_file(chat_id, path: str, caption: str = ""):
         send(chat_id, f"خطا در ارسال فایل: {e}")
 
 
-def send_photo(chat_id, path: str, caption: str = ""):
+def send_photo(chat_id, path: str, caption: str = "", delete_after: bool = False):
     log.info("SEND PHOTO → %s", path)
+    sent_ok = False
     try:
         with open(path, "rb") as f:
             r = requests.post(
@@ -111,11 +112,20 @@ def send_photo(chat_id, path: str, caption: str = ""):
                 files={"photo": (os.path.basename(path), f)},
                 timeout=300, proxies=PROXIES,
             )
-        if not r.json().get("ok"):
+        sent_ok = bool(r.json().get("ok"))
+        if not sent_ok:
             send(chat_id, f"خطا در ارسال عکس: {r.json().get('description', '?')}")
     except Exception as e:
         log.error("send_photo failed: %s", e)
         send(chat_id, f"خطا در ارسال عکس: {e}")
+    # پاک‌سازی پشت‌صحنه: فقط اگر ارسال موفق بود
+    if delete_after and sent_ok and os.path.exists(path):
+        try:
+            os.remove(path)
+            log.info("CLEANED (auto-delete) → %s", path)
+        except Exception as e:
+            log.error("auto-delete failed: %s", e)
+    return sent_ok
 
 
 # ---------------- System actions ----------------
@@ -285,8 +295,9 @@ class ScreenRecorder:
 recorder = ScreenRecorder()
 
 
-def send_video(chat_id, path: str, caption: str = ""):
+def send_video(chat_id, path: str, caption: str = "", delete_after: bool = False):
     log.info("SEND VIDEO → %s", path)
+    sent_ok = False
     try:
         with open(path, "rb") as f:
             r = requests.post(
@@ -296,11 +307,19 @@ def send_video(chat_id, path: str, caption: str = ""):
                 files={"video": (os.path.basename(path), f)},
                 timeout=600, proxies=PROXIES,
             )
-        if not r.json().get("ok"):
+        sent_ok = bool(r.json().get("ok"))
+        if not sent_ok:
             send(chat_id, f"خطا در ارسال ویدیو: {r.json().get('description', '?')}")
     except Exception as e:
         log.error("send_video failed: %s", e)
         send(chat_id, f"خطا در ارسال ویدیو: {e}")
+    if delete_after and sent_ok and os.path.exists(path):
+        try:
+            os.remove(path)
+            log.info("CLEANED (auto-delete) → %s", path)
+        except Exception as e:
+            log.error("auto-delete failed: %s", e)
+    return sent_ok
 
 
 # ---------------- Command handlers ----------------
@@ -478,7 +497,7 @@ def handle_command(chat_id: int, text: str):
                               f"{MAX_MB}MB تلگرام. ضبط کوتاه‌تر کن.")
                 return
             send(chat_id, "📤 در حال ارسال ویدیو…")
-            send_video(chat_id, p, "🎬 ویدیوی صفحه")
+            send_video(chat_id, p, "🎬 ویدیوی صفحه", delete_after=True)
         else:
             send(chat_id, "⚠ ویدیویی برای ارسال نیست. اول ضبط کن: /rec")
 
@@ -486,7 +505,7 @@ def handle_command(chat_id: int, text: str):
         send(chat_id, "📸 در حال گرفتن اسکرین‌شات…")
         try:
             for p in screenshot_all():
-                send_photo(chat_id, p)
+                send_photo(chat_id, p, delete_after=True)
         except Exception as e:
             log.exception("screenshot failed")
             send(chat_id, f"خطا: {e}")
