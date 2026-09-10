@@ -27,6 +27,9 @@ MAX_MB = int(CFG.get("max_upload_mb", 50))
 PROXY = CFG.get("proxy") or None   # مثال: http://10.159.167.160:8080
 PROXIES = {"http": PROXY, "https": PROXY} if PROXY else None
 
+# پوشه ذخیره متن‌های دریافتی (پل اندروید↔ویندوز)
+TEXTS_DIR = os.path.join(DL_DIR, "texts")
+
 # --- opencode bridge (سرور دائمی) ---
 import ai as oc
 
@@ -208,6 +211,44 @@ def find_file(root: str, pattern: str, limit: int = 20) -> list:
 
 # ---------------- Command handlers ----------------
 
+def save_text_message(text: str) -> str:
+    """متن دریافتی را به‌صورت فایل txt ذخیره می‌کند — پل اندروید↔ویندوز"""
+    os.makedirs(TEXTS_DIR, exist_ok=True)
+    fname = "text_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".txt"
+    path = os.path.join(TEXTS_DIR, fname)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return path
+
+
+def save_marked_note(chat_id: int, text: str):
+    """پیام‌هایی که علامت ذخیره دارند → بدون آن علامت، تمیز ذخیره می‌شوند"""
+    try:
+        import re as _re
+        clean = _re.sub(r"[\{\(\[«]\s*ذخیره\s*شود\s*[\}\)\]»]", "", text)
+        clean = _re.sub(r"ذخیره\s*شود[:،,.!]?\s*$", "", clean).strip()
+        if not clean:
+            send(chat_id, "⚠ متن خالی بود — چیزی ذخیره نشد.")
+            return
+        saved = save_text_message(clean)
+        send(chat_id, f"✅ ذخیره شد: {os.path.basename(saved)}")
+    except Exception as e:
+        log.error("save_marked_note failed: %s", e)
+        send(chat_id, f"خطا در ذخیره: {e}")
+
+
+def list_texts(limit: int = 10) -> str:
+    """آخرین متن‌های ذخیره‌شده"""
+    if not os.path.isdir(TEXTS_DIR):
+        return "هنوز متنی ذخیره نشده."
+    files = sorted(os.listdir(TEXTS_DIR), reverse=True)[:limit]
+    if not files:
+        return "هنوز متنی ذخیره نشده."
+    return ("📝 آخرین متن‌ها:\n" +
+            "\n".join("• " + f for f in files) +
+            f"\n\nپوشه: {TEXTS_DIR}")
+
+
 def handle_command(chat_id: int, text: str):
     global OC_WORKSPACE
     parts = text.split(maxsplit=1)
@@ -230,6 +271,8 @@ def handle_command(chat_id: int, text: str):
             "🔍 /find اسم — جستجوی فایل\n"
             "⚡ /run دستور — اجرای PowerShell\n"
             "💻 /status — وضعیت سیستم\n"
+            "📝 /texts — لیست متن‌های ذخیره‌شده\n"
+            "   (برای ذخیره: آخر پیام بنویس {ذخیره شود})\n"
             "🆕 /new — پاک کردن حافظه AI\n"
             "🛑 /stop — توقف کار در حال اجرا\n"
             "📁 /cd مسیر — تغییر پوشه کاری AI\n"
@@ -257,6 +300,9 @@ def handle_command(chat_id: int, text: str):
     elif cmd == "/stop":
         oc.abort_current()
         send(chat_id, "🛑 دستور توقف برای AI ارسال شد.")
+
+    elif cmd == "/texts":
+        send(chat_id, list_texts())
 
     elif cmd == "/shot":
         send(chat_id, "📸 در حال گرفتن اسکرین‌شات…")
@@ -375,10 +421,21 @@ def poll():
                     if text.startswith("/"):
                         threading.Thread(target=handle_command,
                                          args=(chat_id, text), daemon=True).start()
-                    else:
-                        # هر پیام عادی = پرامپت برای opencode
-                        threading.Thread(target=reply_with_ai,
+                    elif _re.search(r"[\{\(\[«]\s*ذخیره\s*شود\s*[\}\)\]»]", text) or \
+                            _re.search(r"ذخیره\s*شود", text[-25:]):
+                        # پیام‌هایی که علامت ذخیره دارند → تمیز ذخیره می‌شوند
+                        threading.Thread(target=save_marked_note,
                                          args=(chat_id, text), daemon=True).start()
+                    else:
+                        # اول: لایه فوری (بدون AI)
+                        quick = quick_match(text)
+                        if quick:
+                            log.info("QUICK MATCH: %s", quick[:60])
+                            send(chat_id, quick)
+                        else:
+                            # غیر آن: به AI
+                            threading.Thread(target=reply_with_ai,
+                                             args=(chat_id, text), daemon=True).start()
                 else:
                     threading.Thread(target=save_and_reply,
                                      args=(chat_id, msg), daemon=True).start()
@@ -388,6 +445,55 @@ def poll():
             log.error("poll error: %s", e)
             import time
             time.sleep(3)
+
+
+# ---------- لایه دستورات فوری (بدون AI) ----------
+
+import re as _re
+
+
+def quick_match(text: str):
+    """دستورات پرتکرار را بدون AI فوری اجرا می‌کند؛ None یعنی مطابقت نداشت"""
+    t = text.strip()
+
+    # نور / روشنایی: «نور رو 30 کن» / «روشنایی 50 درصد»
+    m = _re.search(r"(?:نور|روشنایی)[^\d]{0,20}(\d{1,3})", t)
+    if m and any(w in t for w in ("کن", "بزار", "بذار", "تنظیم", "درصد", "بالا", "کم")):
+        val = int(m.group(1))
+        if 0 <= val <= 100:
+            out = run_powershell(
+                "(Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightnessMethods)"
+                f".WmiSetBrightness(1, {val}) | Out-Null; 'OK'")
+            if "OK" in out:
+                return f"⚡ نور صفحه روی {val}٪ (فوری)"
+            return "⛔ تنظیم نور ناموفق (مانیتور مجازی؟)"
+
+    # صدا: «صدا رو 40 کن»
+    m = _re.search(r"(?:صدا|ولوم|ولیوم)[^\d]{0,15}(\d{1,3})", t)
+    if m and any(w in t for w in ("کن", "بزار", "بذار", "تنظیم", "درصد", "بالا", "کم")):
+        val = int(m.group(1))
+        if 0 <= val <= 100:
+            out = run_powershell(f"Set-Volume -Max {val}; 'OK'")
+            if "OK" in out:
+                return f"⚡ صدا روی {val}٪ (فوری)"
+
+    # باز کردن برنامه‌های معروف
+    apps = {
+        "ماشین حساب": "calc", "حساب": "calc",
+        "نوت پد": "notepad", "نوتپد": "notepad",
+        "تقویم": "explorer.exe shell:CalendarFolder",
+        "عکس": "explorer.exe shell:My Pictures",
+        "تصاویر": "explorer.exe shell:My Pictures",
+        "دانلود": "explorer.exe shell:Downloads",
+        "فایل منیجر": "explorer.exe",
+        "مای اسناد": "explorer.exe shell:Personal",
+    }
+    for key, target in apps.items():
+        if key in t and ("باز" in t or "بخش" in t or "رو" in t):
+            run_powershell(f"Start-Process '{target}'")
+            return f"⚡ باز شد: {key} (فوری)"
+
+    return None
 
 
 def save_and_reply(chat_id: int, msg: dict):
