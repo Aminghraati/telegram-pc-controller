@@ -1,0 +1,14 @@
+{
+  "token": "اینجا_توکن_بات_را_بگذار",
+  "owner_id": 123456789,
+  "downloads_dir": "C:\\Users\\YOUR-USERNAME\\Downloads\\from_telegram",
+  "max_upload_mb": 50,
+  "proxy": "",
+  "opencode_exe": "opencode",
+  "opencode_server": "http://127.0.0.1:4097",
+  "opencode_server_user": "opencode",
+  "opencode_server_pass": "یک_رمز_دلخواه_خودت_بگذار",
+  "opencode_model": "PROVIDER/MODEL-NAME",
+  "opencode_workspace": "C:\\Users\\YOUR-USERNAME",
+  "opencode_timeout_min": 8
+}

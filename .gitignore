@@ -1,0 +1,18 @@
+# هرگز این فایل‌ها را آپلود نکنید — توکن و اطلاعات خصوصی داخلشان است!
+config.json
+bot.log
+bot_*.log
+*.log
+out.log
+err.log
+stdout.log
+stderr.log
+
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# فایل‌های خروجی محلی
+snapshot*/
+*.png
+!docs/**/*.png
