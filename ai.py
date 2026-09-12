@@ -95,6 +95,21 @@ def _status() -> dict:
         return {}
 
 
+def _model_error(data: dict) -> str:
+    """خطاهای مدل (اعتبار، قطعی) را به پیام فارسی تبدیل می‌کند"""
+    err = data.get("info", {}).get("error")
+    if not err:
+        return ""
+    msg = json.dumps(err, ensure_ascii=False).lower()
+    if "credit" in msg or "balance" in msg or "insufficient" in msg:
+        return ("⛔ اعتبار این مدل تمام شد! "
+                "در config.json مدل دیگر را بگذار "
+                "(مثلاً `opencode/big-pickle` رایگان) و بات را restart کن.")
+    if "rate" in msg or "429" in msg:
+        return "⛔ محدودیت تعداد درخواست — یک دقیقه صبر کن و دوباره بفرست."
+    return f"⛔ خطای مدل: {str(err)[:200]}"
+
+
 def chat_async(message: str, on_progress=None) -> str:
     """
     ارسال پیام در thread جدا + مانیتورینگ زنده.
@@ -151,6 +166,9 @@ def chat_async(message: str, on_progress=None) -> str:
     # پاسخ مستقیم از پاسخ POST (سریع‌ترین مسیر)
     try:
         data = result["data"].json()
+        err = _model_error(data)
+        if err:
+            return err
         texts = []
         for part in data.get("parts", []):
             if part.get("type") == "text" and part.get("text", "").strip():
@@ -167,6 +185,9 @@ def chat_async(message: str, on_progress=None) -> str:
             r = HTTP.get(f"{OC_URL}/session/{sid}/message?limit=3", timeout=20)
             for item in reversed(r.json()):
                 if item.get("info", {}).get("role") == "assistant":
+                    err = _model_error(item)
+                    if err:
+                        return err
                     joined = "\n".join(
                         p.get("text", "").strip()
                         for p in item.get("parts", [])

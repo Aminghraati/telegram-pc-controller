@@ -746,6 +746,37 @@ def save_incoming(msg: dict) -> str:
     return dest
 
 
+# ---------------- Single-instance guard ----------------
+
+def ensure_single_instance():
+    """اگر نمونه دیگری از بات در حال اجراست، این نمونه بی‌صدا خارج می‌شود"""
+    my_pid = os.getpid()
+    for p in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            if p.info["pid"] == my_pid:
+                continue
+            name = (p.info["name"] or "").lower()
+            cmd = " ".join(p.info["cmdline"] or [])
+            if "bot.py" in cmd and name.startswith("python"):
+                print(f"⚠ بات دیگری از قبل در حال اجراست (PID {p.info['pid']}). "
+                      "این پنجره بسته می‌شود.")
+                sys.exit(0)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+
+def clear_pending_updates():
+    """پیام‌های قدیمیِ خوانده‌نشده را پاک می‌کند تا سیل پیام نخوریم"""
+    try:
+        r = requests.get(f"{API}/getUpdates",
+                         params={"offset": -1, "timeout": 0},
+                         timeout=10, proxies=PROXIES).json()
+        if r.get("ok") and r["result"]:
+            offset["v"] = r["result"][-1]["update_id"] + 1
+    except Exception:
+        pass
+
+
 # ---------------- Main loop (long polling) ----------------
 
 offset = {"v": 0}
@@ -759,7 +790,13 @@ def poll():
                              timeout=40, proxies=PROXIES)
             data = r.json()
             if not data.get("ok"):
+                # 409 Conflict یعنی نمونه دیگری هم‌زمان getUpdates می‌زند
+                if data.get("error_code") == 409:
+                    log.warning("409 Conflict — نمونه دیگر؟ 10s صبر…")
+                    time.sleep(10)
+                    continue
                 log.error("getUpdates error: %s", data)
+                time.sleep(3)
                 continue
             for upd in data.get("result", []):
                 offset["v"] = upd["update_id"] + 1
@@ -927,6 +964,7 @@ if __name__ == "__main__":
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
+    ensure_single_instance()
     log.info("=== Remote Assistant starting ===")
     log.info("Owner: %s | Downloads: %s", OWNER, DL_DIR)
     send(OWNER, "🟢 بات آنلاین شد. /help برای راهنما.")
