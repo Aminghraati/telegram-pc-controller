@@ -235,6 +235,35 @@ def find_file(root: str, pattern: str, limit: int = 20) -> list:
 
 # ---------------- Screen Recorder ----------------
 
+def send_video(chat_id, path: str, caption: str = "", delete_after: bool = False):
+    log.info("SEND VIDEO → %s", path)
+    sent_ok = False
+    try:
+        with open(path, "rb") as f:
+            r = requests.post(
+                f"{API}/sendVideo",
+                data={"chat_id": chat_id, "caption": caption[:1000],
+                      "supports_streaming": "true"},
+                files={"video": (os.path.basename(path), f)},
+                timeout=300, proxies=PROXIES,
+            )
+        sent_ok = bool(r.json().get("ok"))
+        if sent_ok:
+            log.info("SEND VIDEO done")
+        else:
+            send(chat_id, f"خطا در ارسال ویدیو: {r.json().get('description', '?')}")
+    except Exception as e:
+        log.error("send_video failed: %s", e)
+        send(chat_id, f"خطا در ارسال ویدیو: {e}")
+    if delete_after and sent_ok and os.path.exists(path):
+        try:
+            os.remove(path)
+            log.info("CLEANED (auto-delete) → %s", path)
+        except Exception as e:
+            log.error("auto-delete failed: %s", e)
+    return sent_ok
+
+
 # ---------------- Video Recorder (video + audio) ----------------
 
 class VideoRecorder:
@@ -804,6 +833,28 @@ def clear_pending_updates():
 
 # ---------------- Main loop (long polling) ----------------
 
+def start_logged(fn, *args):
+    """اجرای fn در thread با ثبت هرگونه استثنا در لاگ (بدون مرگ خاموش)"""
+    def runner():
+        try:
+            fn(*args)
+        except Exception as e:
+            log.exception("task %s crashed", getattr(fn, "__name__", "?"))
+            try:
+                send(args[0] if args else OWNER, f"خطا در اجرا: {e}")
+            except Exception:
+                pass
+    threading.Thread(target=runner, daemon=True).start()
+
+
+def bot_ai_available() -> bool:
+    """چک سریع و بی‌صدا: آیا مغز AI در دسترس است؟"""
+    try:
+        return oc.health()
+    except Exception:
+        return False
+
+
 offset = {"v": 0}
 
 
@@ -839,26 +890,25 @@ def poll():
                     text = msg["text"].strip()
                     log.info("MSG from owner: %s", text[:80])
                     if text.startswith("/"):
-                        threading.Thread(target=handle_command,
-                                         args=(chat_id, text), daemon=True).start()
+                        start_logged(handle_command, chat_id, text)
                     elif _re.search(r"[\{\(\[«]\s*ذخیره\s*شود\s*[\}\)\]»]", text) or \
                             _re.search(r"ذخیره\s*شود", text[-25:]):
                         # پیام‌هایی که علامت ذخیره دارند → تمیز ذخیره می‌شوند
-                        threading.Thread(target=save_marked_note,
-                                         args=(chat_id, text), daemon=True).start()
+                        start_logged(save_marked_note, chat_id, text)
                     else:
                         # اول: لایه فوری (بدون AI)
                         quick = quick_match(text)
                         if quick:
                             log.info("QUICK MATCH: %s", quick[:60])
                             send(chat_id, quick)
+                        elif not bot_ai_available():
+                            send(chat_id, "🧠 AI در دسترس نیست؛ دستورات / و"
+                                          " نور/صدا/برنامه بدون AI کار می‌کنند.")
                         else:
                             # غیر آن: به AI
-                            threading.Thread(target=reply_with_ai,
-                                             args=(chat_id, text), daemon=True).start()
+                            start_logged(reply_with_ai, chat_id, text)
                 else:
-                    threading.Thread(target=save_and_reply,
-                                     args=(chat_id, msg), daemon=True).start()
+                    start_logged(save_and_reply, chat_id, msg)
         except requests.exceptions.Timeout:
             continue
         except Exception as e:
@@ -884,34 +934,51 @@ def _read_brightness():
         return None
 
 
+VK_BRIGHTNESS_DOWN = 0xAE
+VK_BRIGHTNESS_UP = 0xAF
+_STEPS = 12          # هر بار فشار ≈ ۱/۱۲ کل بازه
+
+
+def _press_key(vk: int, times: int):
+    """شبیه‌سازی فشار کلید نور کیبورد — مثل زدن Fn+F9/F10"""
+    import ctypes
+    u = ctypes.windll.user32
+    for _ in range(times):
+        u.keybd_event(vk, 0, 0, 0)          # key down
+        time.sleep(0.04)
+        u.keybd_event(vk, 0, 2, 0)          # key up
+        time.sleep(0.12)
+
+
 def set_brightness(pct: int):
     """
-    نور را بدون AI تنظیم می‌کند و نتیجه واقعی را گزارش می‌دهد.
+    تنظیم نور بدون AI.
+    روش ۱: WMI (اگر لپ‌تاپ پشتیبانی کند)
+    روش ۲: شبیه‌سازی کلیدهای نور کیبورد (برای لپ‌تاپ‌هایی که WMI ندارند)
     بازگشت: (ok: bool, message: str)
     """
     before = _read_brightness()
-    # روش ۱: WMI ACPI (ترتیب پارامتر: Brightness, Timeout)
     ps = (
         f"$b={pct}; $w=Get-WmiObject -Namespace root/wmi "
         "-Query 'SELECT * FROM WmiMonitorBrightnessMethods'; "
         "$w.WmiSetBrightness([byte]$b,[uint32]0) | Out-Null; 'Tried'")
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, text=True, timeout=25,
+                           capture_output=True, text=True, timeout=20,
                            encoding="utf-8", errors="replace")
         tried = "Tried" in (r.stdout or "")
     except Exception:
         tried = False
-    time.sleep(1.2)
+    time.sleep(1)
     after = _read_brightness()
-    # قضاوت صادقانه: فقط وقتی عدد تغییر/خوانده شد، «انجام شد» بگو
     if tried and after is not None:
-        return True, f"☀ نور صفحه: {after}٪ (تأیید شده)"
-    if tried and after is None and before is None:
-        return False, (f"☀ دستور نور {pct}٪ ارسال شد ولی این لپ‌تاپ وضعیت نور را "
-                       "به ویندوز گزارش نمی‌دهد (محدودیت درایور/BIOS). "
-                       "اگر کلید Fn نور کار می‌کند، از آن استفاده کن.")
-    return False, f"⛔ تنظیم نور ناموفق بود (مدل: {pct}٪)"
+        return True, f"☀ نور صفحه: {after}٪ (WMI، تأیید شده)"
+    # روش ۲: کلیدهای نور — کف‌کردن بعد بالا رفتن تا درصد تقریبی
+    _press_key(VK_BRIGHTNESS_DOWN, _STEPS + 3)     # به ته نور
+    up = max(0, min(_STEPS, round(pct * _STEPS / 100)))
+    _press_key(VK_BRIGHTNESS_UP, up)               # تا درصد خواسته‌شده
+    return True, (f"☀ نور تقریبی {pct}٪ با کلیدهای کیبورد تنظیم شد.\n"
+                  "اگر دقیق نبود بگو گام‌ها را کالیبره کنم")
 
 
 # ---------- لایه دستورات فوری (بدون AI) ----------
@@ -930,12 +997,9 @@ def quick_match(text: str):
         ok, msg = set_brightness(val)
         return ("⚡ " if ok else "") + msg
     if _re.search(r"(?:نور|روشنایی).*(کم|زیاد|کمتر|بیشتر)", t):
-        step = -20 if ("کم" in t) else 20
-        cur = _read_brightness()
-        if cur is None:
-            cur = 50  # نقطه شروع امن وقتی ویندوز نمی‌خواند
-        ok, msg = set_brightness(max(0, min(100, cur + step)))
-        return ("⚡ " if ok else "") + msg
+        up = "زیاد" in t or "بیشتر" in t
+        _press_key(VK_BRIGHTNESS_UP if up else VK_BRIGHTNESS_DOWN, 2)
+        return "⚡ نور یک‌مقدار زیاد شد" if up else "⚡ نور یک‌مقدار کم شد"
 
     # صدا: «صدا رو 40 کن»
     m = _re.search(r"(?:صدا|ولوم|ولیوم)[^\d]{0,15}(\d{1,3})", t)
