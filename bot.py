@@ -517,7 +517,6 @@ def handle_command(chat_id: int, text: str):
             "   مثال: «اسکرین‌شات بگیر» / «بگو رم چقدر خالی است»\n"
             "────────────────\n"
             "دستورات سریع:\n"
-            "☀ /b1 /b25 /b50 /b75 /b100 — شورتکات نور (بدون AI)\n"
             "📸 /shot — اسکرین‌شات\n"
             "📷 /cam — عکس از وب‌کم\n"
             "🎥 /rec — شروع ضبط ویدیوی صفحه (با صدا)\n"
@@ -692,30 +691,6 @@ def handle_command(chat_id: int, text: str):
         else:
             send(chat_id, "⚠ ویدیویی برای ارسال نیست. اول ضبط کن: /rec")
 
-    elif cmd in ("/b1", "/b25", "/b50", "/b75", "/b100") or cmd == "/b":
-        # شورتکات‌های نور — کاملاً بدون AI
-        if cmd == "/b":
-            try:
-                val = int(arg)
-            except ValueError:
-                send(chat_id, "روش: /b 50 (عدد 0 تا 100)")
-                return
-        else:
-            val = int(cmd[2:])
-        val = max(0, min(100, val))
-        ok, msg = set_brightness(val)
-        send(chat_id, ("⚡ " if ok else "") + msg)
-
-    elif cmd == "/bhelp":
-        send(chat_id, "☀ شورتکات‌های نور (بدون AI):\n"
-                      "/b1 — نور ۱٪ (تقریباً خاموش)\n"
-                      "/b25 — نور ۲۵٪\n"
-                      "/b50 — نور ۵۰٪\n"
-                      "/b75 — نور ۷۵٪\n"
-                      "/b100 — نور ۱۰۰٪\n"
-                      "/b عدد — هر مقدار دلخواه\n"
-                      "متن ساده هم کار می‌کند: «نور رو 40 کن»")
-
     elif cmd == "/shot":
         send(chat_id, "📸 در حال گرفتن اسکرین‌شات…")
         try:
@@ -847,12 +822,6 @@ def start_logged(fn, *args):
     threading.Thread(target=runner, daemon=True).start()
 
 
-def bot_ai_available() -> bool:
-    """چک سریع و بی‌صدا: آیا مغز AI در دسترس است؟"""
-    try:
-        return oc.health()
-    except Exception:
-        return False
 
 
 offset = {"v": 0}
@@ -901,11 +870,8 @@ def poll():
                         if quick:
                             log.info("QUICK MATCH: %s", quick[:60])
                             send(chat_id, quick)
-                        elif not bot_ai_available():
-                            send(chat_id, "🧠 AI در دسترس نیست؛ دستورات / و"
-                                          " نور/صدا/برنامه بدون AI کار می‌کنند.")
                         else:
-                            # غیر آن: به AI
+                            # به AI — خودش سرور را اگر خاموش است بالا می‌آورد
                             start_logged(reply_with_ai, chat_id, text)
                 else:
                     start_logged(save_and_reply, chat_id, msg)
@@ -917,70 +883,6 @@ def poll():
             time.sleep(3)
 
 
-# ---------- نور صفحه (بدون AI) ----------
-
-def _read_brightness():
-    """نور فعلی را با WMI می‌خواند؛ None یعنی ناموفق"""
-    try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "(Get-CimInstance -Namespace root/wmi -ClassName "
-             "WmiMonitorBrightness).ActiveBrightness"],
-            capture_output=True, text=True, timeout=20,
-            encoding="utf-8", errors="replace")
-        v = r.stdout.strip()
-        return int(v) if v.isdigit() else None
-    except Exception:
-        return None
-
-
-VK_BRIGHTNESS_DOWN = 0xAE
-VK_BRIGHTNESS_UP = 0xAF
-_STEPS = 12          # هر بار فشار ≈ ۱/۱۲ کل بازه
-
-
-def _press_key(vk: int, times: int):
-    """شبیه‌سازی فشار کلید نور کیبورد — مثل زدن Fn+F9/F10"""
-    import ctypes
-    u = ctypes.windll.user32
-    for _ in range(times):
-        u.keybd_event(vk, 0, 0, 0)          # key down
-        time.sleep(0.04)
-        u.keybd_event(vk, 0, 2, 0)          # key up
-        time.sleep(0.12)
-
-
-def set_brightness(pct: int):
-    """
-    تنظیم نور بدون AI.
-    روش ۱: WMI (اگر لپ‌تاپ پشتیبانی کند)
-    روش ۲: شبیه‌سازی کلیدهای نور کیبورد (برای لپ‌تاپ‌هایی که WMI ندارند)
-    بازگشت: (ok: bool, message: str)
-    """
-    before = _read_brightness()
-    ps = (
-        f"$b={pct}; $w=Get-WmiObject -Namespace root/wmi "
-        "-Query 'SELECT * FROM WmiMonitorBrightnessMethods'; "
-        "$w.WmiSetBrightness([byte]$b,[uint32]0) | Out-Null; 'Tried'")
-    try:
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, text=True, timeout=20,
-                           encoding="utf-8", errors="replace")
-        tried = "Tried" in (r.stdout or "")
-    except Exception:
-        tried = False
-    time.sleep(1)
-    after = _read_brightness()
-    if tried and after is not None:
-        return True, f"☀ نور صفحه: {after}٪ (WMI، تأیید شده)"
-    # روش ۲: کلیدهای نور — کف‌کردن بعد بالا رفتن تا درصد تقریبی
-    _press_key(VK_BRIGHTNESS_DOWN, _STEPS + 3)     # به ته نور
-    up = max(0, min(_STEPS, round(pct * _STEPS / 100)))
-    _press_key(VK_BRIGHTNESS_UP, up)               # تا درصد خواسته‌شده
-    return True, (f"☀ نور تقریبی {pct}٪ با کلیدهای کیبورد تنظیم شد.\n"
-                  "اگر دقیق نبود بگو گام‌ها را کالیبره کنم")
-
-
 # ---------- لایه دستورات فوری (بدون AI) ----------
 
 import re as _re
@@ -990,16 +892,11 @@ def quick_match(text: str):
     """دستورات پرتکرار را بدون AI فوری اجرا می‌کند؛ None یعنی مطابقت نداشت"""
     t = text.strip()
 
-    # نور / روشنایی: «نور رو 30 کن» / «روشنایی 50 درصد» / «نور رو کم/زیاد کن»
-    m = _re.search(r"(?:نور|روشنایی)[^\d]{0,20}(\d{1,3})", t)
-    if m and any(w in t for w in ("کن", "بزار", "بذار", "تنظیم", "درصد", "بالا", "کم")):
-        val = max(0, min(100, int(m.group(1))))
-        ok, msg = set_brightness(val)
-        return ("⚡ " if ok else "") + msg
-    if _re.search(r"(?:نور|روشنایی).*(کم|زیاد|کمتر|بیشتر)", t):
-        up = "زیاد" in t or "بیشتر" in t
-        _press_key(VK_BRIGHTNESS_UP if up else VK_BRIGHTNESS_DOWN, 2)
-        return "⚡ نور یک‌مقدار زیاد شد" if up else "⚡ نور یک‌مقدار کم شد"
+    # تله‌ی نور: این قابلیت حذف شده — نگذار AI وانمود کند انجام داد
+    if _re.search(r"(?:نور|روشنایی)", t) and any(
+            w in t for w in ("کم", "زیاد", "درصد", "%", "تنظیم", "بزار", "بذار")):
+        return ("🔕 تنظیم نور از بات حذف شد (لپ‌تاپ پشتیبانی نمی‌کرد). "
+                "از کلیدهای نور روی کیبورد استفاده کن.")
 
     # صدا: «صدا رو 40 کن»
     m = _re.search(r"(?:صدا|ولوم|ولیوم)[^\d]{0,15}(\d{1,3})", t)
