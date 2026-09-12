@@ -98,7 +98,7 @@
 
 ```
 Use this token to access the HTTP API:
-<TOKEN-EXAMPLE-HERE>
+<توکن-نمونه-شما-اینجا-قرار-می‌گیرد>
 ```
 
 9. **این خط طولانی، «توکن» بات توست.** مثل رمز عبور بات است!
@@ -125,7 +125,7 @@ Use this token to access the HTTP API:
 1. در BotFather پیامت را نیمه‌کاره رها کن! اول این کار را بکن: باتت را در تلگرام پیدا کن (با usernameای که مرحله ۲ ساختی) و **Start** بزن و یک پیام دلخواه بفرست: `salam`
 2. حالا این لینک را در **مرورگر کروم کامپیوتر** باز کن (توکن خودت را جایگزین کن):
    ```
-   https://api.telegram.org/bot<YOUR-TOKEN>/getUpdates/getUpdates
+   https://api.telegram.org/bot<توکن-شما>/getUpdates/getUpdates
    ```
    (دقت کن قبل از توکن کلمه `bot` آمده و بعدش `/getUpdates`)
 3. در جوابی که می‌آید دنبال این بگردی: `"chat":{"id":123456789,...`
