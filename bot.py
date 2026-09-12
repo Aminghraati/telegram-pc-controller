@@ -488,6 +488,7 @@ def handle_command(chat_id: int, text: str):
             "   مثال: «اسکرین‌شات بگیر» / «بگو رم چقدر خالی است»\n"
             "────────────────\n"
             "دستورات سریع:\n"
+            "☀ /b1 /b25 /b50 /b75 /b100 — شورتکات نور (بدون AI)\n"
             "📸 /shot — اسکرین‌شات\n"
             "📷 /cam — عکس از وب‌کم\n"
             "🎥 /rec — شروع ضبط ویدیوی صفحه (با صدا)\n"
@@ -661,6 +662,30 @@ def handle_command(chat_id: int, text: str):
             send_video(chat_id, p, "🎬 ویدیوی صفحه", delete_after=True)
         else:
             send(chat_id, "⚠ ویدیویی برای ارسال نیست. اول ضبط کن: /rec")
+
+    elif cmd in ("/b1", "/b25", "/b50", "/b75", "/b100") or cmd == "/b":
+        # شورتکات‌های نور — کاملاً بدون AI
+        if cmd == "/b":
+            try:
+                val = int(arg)
+            except ValueError:
+                send(chat_id, "روش: /b 50 (عدد 0 تا 100)")
+                return
+        else:
+            val = int(cmd[2:])
+        val = max(0, min(100, val))
+        ok, msg = set_brightness(val)
+        send(chat_id, ("⚡ " if ok else "") + msg)
+
+    elif cmd == "/bhelp":
+        send(chat_id, "☀ شورتکات‌های نور (بدون AI):\n"
+                      "/b1 — نور ۱٪ (تقریباً خاموش)\n"
+                      "/b25 — نور ۲۵٪\n"
+                      "/b50 — نور ۵۰٪\n"
+                      "/b75 — نور ۷۵٪\n"
+                      "/b100 — نور ۱۰۰٪\n"
+                      "/b عدد — هر مقدار دلخواه\n"
+                      "متن ساده هم کار می‌کند: «نور رو 40 کن»")
 
     elif cmd == "/shot":
         send(chat_id, "📸 در حال گرفتن اسکرین‌شات…")
@@ -842,6 +867,53 @@ def poll():
             time.sleep(3)
 
 
+# ---------- نور صفحه (بدون AI) ----------
+
+def _read_brightness():
+    """نور فعلی را با WMI می‌خواند؛ None یعنی ناموفق"""
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-CimInstance -Namespace root/wmi -ClassName "
+             "WmiMonitorBrightness).ActiveBrightness"],
+            capture_output=True, text=True, timeout=20,
+            encoding="utf-8", errors="replace")
+        v = r.stdout.strip()
+        return int(v) if v.isdigit() else None
+    except Exception:
+        return None
+
+
+def set_brightness(pct: int):
+    """
+    نور را بدون AI تنظیم می‌کند و نتیجه واقعی را گزارش می‌دهد.
+    بازگشت: (ok: bool, message: str)
+    """
+    before = _read_brightness()
+    # روش ۱: WMI ACPI (ترتیب پارامتر: Brightness, Timeout)
+    ps = (
+        f"$b={pct}; $w=Get-WmiObject -Namespace root/wmi "
+        "-Query 'SELECT * FROM WmiMonitorBrightnessMethods'; "
+        "$w.WmiSetBrightness([byte]$b,[uint32]0) | Out-Null; 'Tried'")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, text=True, timeout=25,
+                           encoding="utf-8", errors="replace")
+        tried = "Tried" in (r.stdout or "")
+    except Exception:
+        tried = False
+    time.sleep(1.2)
+    after = _read_brightness()
+    # قضاوت صادقانه: فقط وقتی عدد تغییر/خوانده شد، «انجام شد» بگو
+    if tried and after is not None:
+        return True, f"☀ نور صفحه: {after}٪ (تأیید شده)"
+    if tried and after is None and before is None:
+        return False, (f"☀ دستور نور {pct}٪ ارسال شد ولی این لپ‌تاپ وضعیت نور را "
+                       "به ویندوز گزارش نمی‌دهد (محدودیت درایور/BIOS). "
+                       "اگر کلید Fn نور کار می‌کند، از آن استفاده کن.")
+    return False, f"⛔ تنظیم نور ناموفق بود (مدل: {pct}٪)"
+
+
 # ---------- لایه دستورات فوری (بدون AI) ----------
 
 import re as _re
@@ -851,17 +923,19 @@ def quick_match(text: str):
     """دستورات پرتکرار را بدون AI فوری اجرا می‌کند؛ None یعنی مطابقت نداشت"""
     t = text.strip()
 
-    # نور / روشنایی: «نور رو 30 کن» / «روشنایی 50 درصد»
+    # نور / روشنایی: «نور رو 30 کن» / «روشنایی 50 درصد» / «نور رو کم/زیاد کن»
     m = _re.search(r"(?:نور|روشنایی)[^\d]{0,20}(\d{1,3})", t)
     if m and any(w in t for w in ("کن", "بزار", "بذار", "تنظیم", "درصد", "بالا", "کم")):
-        val = int(m.group(1))
-        if 0 <= val <= 100:
-            out = run_powershell(
-                "(Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightnessMethods)"
-                f".WmiSetBrightness(1, {val}) | Out-Null; 'OK'")
-            if "OK" in out:
-                return f"⚡ نور صفحه روی {val}٪ (فوری)"
-            return "⛔ تنظیم نور ناموفق (مانیتور مجازی؟)"
+        val = max(0, min(100, int(m.group(1))))
+        ok, msg = set_brightness(val)
+        return ("⚡ " if ok else "") + msg
+    if _re.search(r"(?:نور|روشنایی).*(کم|زیاد|کمتر|بیشتر)", t):
+        step = -20 if ("کم" in t) else 20
+        cur = _read_brightness()
+        if cur is None:
+            cur = 50  # نقطه شروع امن وقتی ویندوز نمی‌خواند
+        ok, msg = set_brightness(max(0, min(100, cur + step)))
+        return ("⚡ " if ok else "") + msg
 
     # صدا: «صدا رو 40 کن»
     m = _re.search(r"(?:صدا|ولوم|ولیوم)[^\d]{0,15}(\d{1,3})", t)
